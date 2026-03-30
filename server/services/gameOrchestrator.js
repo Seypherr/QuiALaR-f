@@ -203,7 +203,25 @@ export class GameOrchestrator {
   }
 
   async createRoom(payload) {
-    const room = await createRoom(payload);
+    const requestedMaxPlayers = payload?.maxPlayers == null
+      ? null
+      : Number(payload.maxPlayers);
+
+    if (
+      requestedMaxPlayers != null
+      && (
+        !Number.isInteger(requestedMaxPlayers)
+        || requestedMaxPlayers < 1
+        || requestedMaxPlayers > 8
+      )
+    ) {
+      throw new Error('Le nombre maximum de joueurs doit etre compris entre 1 et 8.');
+    }
+
+    const room = await createRoom({
+      ...payload,
+      maxPlayers: requestedMaxPlayers ?? 8,
+    });
     this.getRuntime(room.roomCode);
 
     return {
@@ -530,7 +548,10 @@ export class GameOrchestrator {
   async finishGame(roomCode, existingPlayers = null) {
     const room = await this.requireRoom(roomCode);
     const players = existingPlayers ?? (await listPlayers(room.id));
-    const winner = chooseWinner(players);
+    const winnerPool = players.filter(
+      (player) => player.status === 'alive' || player.status === 'winner',
+    );
+    const winner = chooseWinner(winnerPool.length ? winnerPool : players);
 
     if (winner && winner.status !== 'winner') {
       await markWinner(winner.id);
@@ -561,7 +582,9 @@ export class GameOrchestrator {
       currentAnswers.map((answer) => [answer.roomPlayerId, answer]),
     );
     const playersById = new Map(players.map((player) => [player.id, player]));
-    const aliveCount = players.filter((player) => player.status === 'alive').length;
+    const aliveCount = players.filter(
+      (player) => player.status === 'alive' || player.status === 'winner',
+    ).length;
 
     const leaderboard = [...players]
       .sort((left, right) => {

@@ -2,6 +2,16 @@ import { withConnection, withTransaction } from '../db.js';
 import { config } from '../config.js';
 
 const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const PLAYABLE_QUESTION_FILTER = `
+  SELECT question_id
+  FROM choices
+  GROUP BY question_id
+  HAVING COUNT(*) = 4
+     AND SUM(CASE WHEN label = 'A' THEN 1 ELSE 0 END) = 1
+     AND SUM(CASE WHEN label = 'B' THEN 1 ELSE 0 END) = 1
+     AND SUM(CASE WHEN label = 'C' THEN 1 ELSE 0 END) = 1
+     AND SUM(CASE WHEN label = 'D' THEN 1 ELSE 0 END) = 1
+`;
 
 function createRoomCodeCandidate(length = 6) {
   return Array.from({ length }, () => {
@@ -116,7 +126,12 @@ function mapAnswer(row) {
 
 async function appendQuestionCycle(connection, roomId, themeId, startOrder) {
   const params = [];
-  let sql = 'SELECT id FROM questions WHERE is_active = 1';
+  let sql = `
+    SELECT q.id
+    FROM questions q
+    JOIN (${PLAYABLE_QUESTION_FILTER}) playable ON playable.question_id = q.id
+    WHERE q.is_active = 1
+  `;
 
   if (themeId) {
     sql += ' AND theme_id = ?';
@@ -129,12 +144,16 @@ async function appendQuestionCycle(connection, roomId, themeId, startOrder) {
 
   if (!questions.length && themeId) {
     questions = await connection.query(
-      'SELECT id FROM questions WHERE is_active = 1 ORDER BY id ASC',
+      `SELECT q.id
+       FROM questions q
+       JOIN (${PLAYABLE_QUESTION_FILTER}) playable ON playable.question_id = q.id
+       WHERE q.is_active = 1
+       ORDER BY q.id ASC`,
     );
   }
 
   if (!questions.length) {
-    throw new Error('Aucune question active disponible en base.');
+    throw new Error('Aucune question jouable avec 4 reponses A/B/C/D n est disponible en base.');
   }
 
   for (const [index, question] of questions.entries()) {
@@ -329,10 +348,11 @@ export async function getQuestionById(questionId, existingConnection = null) {
 export async function getNextRoomQuestion(room, currentOrder = 0) {
   return withTransaction(async (connection) => {
     let rows = await connection.query(
-      `SELECT id, question_id, question_order
-       FROM room_questions
-       WHERE room_id = ? AND question_order > ?
-       ORDER BY question_order ASC
+      `SELECT rq.id, rq.question_id, rq.question_order
+       FROM room_questions rq
+       JOIN (${PLAYABLE_QUESTION_FILTER}) playable ON playable.question_id = rq.question_id
+       WHERE rq.room_id = ? AND rq.question_order > ?
+       ORDER BY rq.question_order ASC
        LIMIT 1`,
       [room.id, currentOrder],
     );
@@ -351,10 +371,11 @@ export async function getNextRoomQuestion(room, currentOrder = 0) {
       );
 
       rows = await connection.query(
-        `SELECT id, question_id, question_order
-         FROM room_questions
-         WHERE room_id = ? AND question_order > ?
-         ORDER BY question_order ASC
+        `SELECT rq.id, rq.question_id, rq.question_order
+         FROM room_questions rq
+         JOIN (${PLAYABLE_QUESTION_FILTER}) playable ON playable.question_id = rq.question_id
+         WHERE rq.room_id = ? AND rq.question_order > ?
+         ORDER BY rq.question_order ASC
          LIMIT 1`,
         [room.id, currentOrder],
       );
@@ -544,6 +565,7 @@ export async function markWinner(playerId) {
       `UPDATE room_players
        SET status = 'winner',
            is_active = 1,
+           eliminated_at = NULL,
            final_rank = 1,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`,

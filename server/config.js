@@ -30,6 +30,6 @@ export const config = {
       process.env.DEFAULT_ELIMINATION_INTERVAL_SECONDS,
       120,
     ),
-    defaultMaxPlayers: toNumber(process.env.DEFAULT_MAX_PLAYERS, 20),
+    defaultMaxPlayers: toNumber(process.env.DEFAULT_MAX_PLAYERS, 8),
   },
 };
