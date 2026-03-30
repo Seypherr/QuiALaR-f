@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+/* Tes variables custom en dessous */
+:root {
+  --accent: #aa3bff;
+  color-scheme: light dark;
+}
