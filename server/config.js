@@ -1,3 +1,4 @@
+import path from 'node:path';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -28,18 +29,14 @@ export const config = {
   port: toNumber(process.env.PORT, 3001),
   clientOrigins: toOrigins(process.env.CLIENT_ORIGIN),
   db: {
-    host: process.env.DB_HOST ?? '127.0.0.1',
-    port: toNumber(process.env.DB_PORT, 3306),
-    user: process.env.DB_USER ?? 'root',
-    password: process.env.DB_PASSWORD ?? '',
-    database: process.env.DB_NAME ?? 'enigma',
-    connectionLimit: toNumber(process.env.DB_CONNECTION_LIMIT, 10),
-    connectTimeoutMs: toNumber(process.env.DB_CONNECT_TIMEOUT_MS, 5000),
-    acquireTimeoutMs: toNumber(process.env.DB_ACQUIRE_TIMEOUT_MS, 10000),
-    idleTimeoutSeconds: toNumber(process.env.DB_IDLE_TIMEOUT_SECONDS, 30),
+    url: process.env.TURSO_DATABASE_URL
+      ?? `file:${path.join(process.cwd(), 'data', 'local.db')}`,
+    authToken: process.env.TURSO_AUTH_TOKEN ?? '',
+    bootstrapOnStart: String(process.env.TURSO_BOOTSTRAP_ON_START ?? 'false') === 'true',
   },
   http: {
     requestTimeoutMs: toNumber(process.env.REQUEST_TIMEOUT_MS, 10000),
+    pollingIntervalMs: toNumber(process.env.POLLING_INTERVAL_MS, 1000),
   },
   game: {
     defaultEliminationIntervalSeconds: toNumber(

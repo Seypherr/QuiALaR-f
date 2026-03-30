@@ -1,8 +1,6 @@
 import {
-  bindSocketToPlayer,
-  clearSocket,
   createPlayer,
-  createRoom,
+  createRoom as createRoomRecord,
   eliminatePlayer,
   ensureQuestionCycle,
   finishRoom,
@@ -18,6 +16,7 @@ import {
   markWinner,
   moveToRevealPhase,
   saveQuestionResults,
+  updateRoomElimination,
 } from '../repositories/gameRepository.js';
 
 function normalizeRoomCode(roomCode) {
@@ -28,6 +27,19 @@ function normalizeTextAnswer(value) {
   return String(value ?? '')
     .trim()
     .toLowerCase();
+}
+
+function toTimestamp(value) {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function toIsoString(timestamp) {
+  return new Date(timestamp).toISOString();
 }
 
 function buildQuestionPayload(question, phase) {
@@ -139,59 +151,28 @@ function evaluateAnswer(question, payload) {
   };
 }
 
+async function buildRoomContext(room) {
+  const players = await listPlayers(room.id);
+  const playersById = new Map(players.map((player) => [player.id, player]));
+  const currentQuestion = room.currentQuestionId
+    ? await getQuestionById(room.currentQuestionId)
+    : null;
+  const answers = currentQuestion
+    ? await listAnswersForQuestion(room.id, currentQuestion.id)
+    : [];
+  const answerByPlayerId = new Map(answers.map((answer) => [answer.roomPlayerId, answer]));
+
+  return {
+    room,
+    players,
+    playersById,
+    currentQuestion,
+    answers,
+    answerByPlayerId,
+  };
+}
+
 export class GameOrchestrator {
-  constructor(io) {
-    this.io = io;
-    this.roomRuntimes = new Map();
-    this.socketSessions = new Map();
-  }
-
-  getRuntime(roomCode) {
-    const normalizedCode = normalizeRoomCode(roomCode);
-
-    if (!this.roomRuntimes.has(normalizedCode)) {
-      this.roomRuntimes.set(normalizedCode, {
-        currentQuestionOrder: 0,
-        currentRoomQuestionId: null,
-        questionStartedAt: null,
-        questionEndsAt: null,
-        revealEndsAt: null,
-        nextEliminationAt: null,
-        questionTimeout: null,
-        revealTimeout: null,
-        eliminationInterval: null,
-        lastReveal: null,
-        lastElimination: null,
-      });
-    }
-
-    return this.roomRuntimes.get(normalizedCode);
-  }
-
-  clearQuestionTimers(roomCode) {
-    const runtime = this.getRuntime(roomCode);
-
-    if (runtime.questionTimeout) {
-      clearTimeout(runtime.questionTimeout);
-      runtime.questionTimeout = null;
-    }
-
-    if (runtime.revealTimeout) {
-      clearTimeout(runtime.revealTimeout);
-      runtime.revealTimeout = null;
-    }
-  }
-
-  clearAllRuntimeTimers(roomCode) {
-    const runtime = this.getRuntime(roomCode);
-    this.clearQuestionTimers(roomCode);
-
-    if (runtime.eliminationInterval) {
-      clearInterval(runtime.eliminationInterval);
-      runtime.eliminationInterval = null;
-    }
-  }
-
   async requireRoom(roomCode) {
     const room = await getRoomByCode(normalizeRoomCode(roomCode));
 
@@ -218,11 +199,10 @@ export class GameOrchestrator {
       throw new Error('Le nombre maximum de joueurs doit etre compris entre 1 et 8.');
     }
 
-    const room = await createRoom({
+    const room = await createRoomRecord({
       ...payload,
       maxPlayers: requestedMaxPlayers ?? 8,
     });
-    this.getRuntime(room.roomCode);
 
     return {
       room,
@@ -252,69 +232,11 @@ export class GameOrchestrator {
       nickname: String(nickname).trim(),
     });
 
-    await this.broadcastState(room.roomCode);
-
     return {
       room,
       player,
       state: await this.getState(room.roomCode, { role: 'player', playerId: player.id }),
     };
-  }
-
-  async watchRoom(socket, { roomCode, role = 'spectator', playerId = null }) {
-    const room = await this.requireRoom(roomCode);
-    const normalizedCode = room.roomCode;
-
-    await socket.join(`room:${normalizedCode}`);
-
-    if (role === 'player') {
-      if (!playerId) {
-        throw new Error('Un playerId est requis pour souscrire en tant que joueur.');
-      }
-
-      const player = await getPlayerById(playerId);
-
-      if (!player || player.roomId !== room.id) {
-        throw new Error('Le joueur demande est introuvable dans cette room.');
-      }
-
-      await bindSocketToPlayer(player.id, socket.id);
-      this.socketSessions.set(socket.id, {
-        roomCode: normalizedCode,
-        role: 'player',
-        playerId: player.id,
-      });
-    } else {
-      this.socketSessions.set(socket.id, {
-        roomCode: normalizedCode,
-        role,
-        playerId: null,
-      });
-    }
-
-    const state = await this.getState(normalizedCode, {
-      role,
-      playerId,
-    });
-
-    socket.emit('room:state', state);
-
-    return state;
-  }
-
-  async handleDisconnect(socketId) {
-    const session = this.socketSessions.get(socketId);
-
-    if (!session) {
-      return;
-    }
-
-    this.socketSessions.delete(socketId);
-
-    if (session.playerId) {
-      await clearSocket(socketId);
-      await this.broadcastState(session.roomCode);
-    }
   }
 
   async startRoom(roomCode) {
@@ -331,52 +253,27 @@ export class GameOrchestrator {
 
     await ensureQuestionCycle(room);
 
-    const runtime = this.getRuntime(room.roomCode);
-    runtime.nextEliminationAt = Date.now() + (room.eliminationIntervalSeconds * 1000);
-    runtime.lastElimination = null;
+    const next = await getNextRoomQuestion(room, 0);
+    const now = Date.now();
+    const phaseStartedAt = toIsoString(now);
+    const phaseEndsAt = toIsoString(now + (next.question.answerTimeSeconds * 1000));
+    const nextEliminationAt = toIsoString(now + (room.eliminationIntervalSeconds * 1000));
 
-    await this.launchNextQuestion(room.roomCode);
-
-    runtime.eliminationInterval = setInterval(async () => {
-      try {
-        await this.runElimination(room.roomCode);
-      } catch (error) {
-        console.error(`[elimination:${room.roomCode}]`, error);
-      }
-    }, room.eliminationIntervalSeconds * 1000);
+    await launchQuestion({
+      roomId: room.id,
+      roomQuestionId: next.roomQuestionId,
+      questionId: next.questionId,
+      questionOrder: next.questionOrder,
+      phaseStartedAt,
+      phaseEndsAt,
+      nextEliminationAt,
+    });
 
     return this.getState(room.roomCode);
   }
 
-  async launchNextQuestion(roomCode) {
-    const room = await this.requireRoom(roomCode);
-    const runtime = this.getRuntime(room.roomCode);
-    const next = await getNextRoomQuestion(room, runtime.currentQuestionOrder);
-
-    runtime.currentQuestionOrder = next.questionOrder;
-    runtime.currentRoomQuestionId = next.roomQuestionId;
-    runtime.questionStartedAt = Date.now();
-    runtime.questionEndsAt = runtime.questionStartedAt + (next.question.answerTimeSeconds * 1000);
-    runtime.revealEndsAt = null;
-    runtime.lastReveal = null;
-
-    await launchQuestion(room.id, next.roomQuestionId, next.question.id);
-
-    this.clearQuestionTimers(room.roomCode);
-    runtime.questionTimeout = setTimeout(async () => {
-      try {
-        await this.endCurrentQuestion(room.roomCode);
-      } catch (error) {
-        console.error(`[question:end:${room.roomCode}]`, error);
-      }
-    }, next.question.answerTimeSeconds * 1000);
-
-    await this.broadcastState(room.roomCode);
-  }
-
   async submitAnswer({ roomCode, playerId, choiceId, typedAnswer }) {
-    const room = await this.requireRoom(roomCode);
-    const runtime = this.getRuntime(room.roomCode);
+    const room = await this.reconcileRoom(roomCode);
 
     if (room.status !== 'in_progress' || room.currentPhase !== 'question_live') {
       throw new Error('La room n est pas en phase de reponse.');
@@ -405,7 +302,8 @@ export class GameOrchestrator {
     }
 
     const evaluation = evaluateAnswer(currentQuestion, { choiceId, typedAnswer });
-    const responseTimeMs = Math.max(Date.now() - runtime.questionStartedAt, 0);
+    const startedAt = toTimestamp(room.phaseStartedAt) ?? Date.now();
+    const responseTimeMs = Math.max(Date.now() - startedAt, 0);
 
     await insertPlayerAnswer({
       roomId: room.id,
@@ -417,29 +315,67 @@ export class GameOrchestrator {
       responseTimeMs,
     });
 
-    await this.broadcastState(room.roomCode);
-
     return {
       accepted: true,
       responseTimeMs,
     };
   }
 
-  async endCurrentQuestion(roomCode) {
-    const room = await this.requireRoom(roomCode);
-    const runtime = this.getRuntime(room.roomCode);
-    const question = await getQuestionById(room.currentQuestionId);
+  async reconcileRoom(roomCode) {
+    let room = await this.requireRoom(roomCode);
+
+    for (let iteration = 0; iteration < 20; iteration += 1) {
+      if (room.status === 'lobby' || room.status === 'finished') {
+        return room;
+      }
+
+      const context = await buildRoomContext(room);
+      const alivePlayers = context.players.filter(
+        (player) => player.status === 'alive' || player.status === 'winner',
+      );
+      const now = Date.now();
+      const nextEliminationAt = toTimestamp(room.nextEliminationAt);
+      const phaseEndsAt = toTimestamp(room.phaseEndsAt);
+
+      if (alivePlayers.length <= 1) {
+        await this.finishGame(room, context.players, now);
+        room = await this.requireRoom(room.roomCode);
+        continue;
+      }
+
+      if (nextEliminationAt && nextEliminationAt <= now) {
+        await this.runElimination(room, context.players, now);
+        room = await this.requireRoom(room.roomCode);
+        continue;
+      }
+
+      if (room.currentPhase === 'question_live' && phaseEndsAt && phaseEndsAt <= now) {
+        await this.endCurrentQuestion(room, context, now);
+        room = await this.requireRoom(room.roomCode);
+        continue;
+      }
+
+      if (room.currentPhase === 'answer_reveal' && phaseEndsAt && phaseEndsAt <= now) {
+        await this.afterReveal(room, context.players, now);
+        room = await this.requireRoom(room.roomCode);
+        continue;
+      }
+
+      return room;
+    }
+
+    throw new Error('La room a depasse la limite de transitions automatiques.');
+  }
+
+  async endCurrentQuestion(room, context, now = Date.now()) {
+    const question = context.currentQuestion ?? await getQuestionById(room.currentQuestionId);
 
     if (!question) {
       throw new Error('Impossible de finaliser une question introuvable.');
     }
 
-    const players = await listPlayers(room.id);
-    const answers = await listAnswersForQuestion(room.id, question.id);
-    const answerByPlayerId = new Map(answers.map((answer) => [answer.roomPlayerId, answer]));
-    const correctChoice = getCorrectChoice(question);
-
-    const playerResults = players.map((player) => {
+    const answerByPlayerId = context.answerByPlayerId;
+    const playerResults = context.players.map((player) => {
       const answer = answerByPlayerId.get(player.id);
       const answered = Boolean(answer);
       const isCorrect = Boolean(answer?.isCorrect);
@@ -449,10 +385,10 @@ export class GameOrchestrator {
       const nextWrongAnswers = player.wrongAnswers + (isCorrect ? 0 : 1);
       const nextAverageResponseMs = answered
         ? computeAverageResponse(
-            player.averageResponseMs,
-            player.answeredCount,
-            answer.responseTimeMs,
-          )
+          player.averageResponseMs,
+          player.answeredCount,
+          answer.responseTimeMs,
+        )
         : player.averageResponseMs;
 
       return {
@@ -473,120 +409,91 @@ export class GameOrchestrator {
       playerResults,
     });
 
-    await moveToRevealPhase(room.id, runtime.currentRoomQuestionId);
+    const phaseStartedAt = toIsoString(now);
+    const phaseEndsAt = toIsoString(now + (question.revealTimeSeconds * 1000));
 
-    runtime.lastReveal = {
-      questionId: question.id,
-      correctChoiceId: correctChoice?.id ?? null,
-      correctChoiceLabel: correctChoice?.label ?? null,
-      correctChoiceText: correctChoice?.text ?? question.correctText ?? null,
-      explanation: question.explanation,
-    };
-    runtime.revealEndsAt = Date.now() + (question.revealTimeSeconds * 1000);
-
-    runtime.revealTimeout = setTimeout(async () => {
-      try {
-        await this.afterReveal(room.roomCode);
-      } catch (error) {
-        console.error(`[reveal:end:${room.roomCode}]`, error);
-      }
-    }, question.revealTimeSeconds * 1000);
-
-    await this.broadcastState(room.roomCode);
+    await moveToRevealPhase({
+      roomId: room.id,
+      roomQuestionId: room.currentRoomQuestionId,
+      phaseStartedAt,
+      phaseEndsAt,
+    });
   }
 
-  async afterReveal(roomCode) {
-    const room = await this.requireRoom(roomCode);
-    const players = await listPlayers(room.id);
+  async afterReveal(room, players, now = Date.now()) {
     const alivePlayers = players.filter((player) => player.status === 'alive');
 
     if (alivePlayers.length <= 1) {
-      await this.finishGame(room.roomCode, players);
+      await this.finishGame(room, players, now);
       return;
     }
 
-    await this.launchNextQuestion(room.roomCode);
+    const next = await getNextRoomQuestion(room, room.currentQuestionOrder);
+    const phaseStartedAt = toIsoString(now);
+    const phaseEndsAt = toIsoString(now + (next.question.answerTimeSeconds * 1000));
+
+    await launchQuestion({
+      roomId: room.id,
+      roomQuestionId: next.roomQuestionId,
+      questionId: next.questionId,
+      questionOrder: next.questionOrder,
+      phaseStartedAt,
+      phaseEndsAt,
+      nextEliminationAt: room.nextEliminationAt,
+    });
   }
 
-  async runElimination(roomCode) {
-    const room = await this.requireRoom(roomCode);
-
-    if (room.status !== 'in_progress') {
-      return;
-    }
-
-    const players = await listPlayers(room.id);
+  async runElimination(room, players, now = Date.now()) {
     const alivePlayers = players.filter((player) => player.status === 'alive');
 
     if (alivePlayers.length <= 1) {
-      await this.finishGame(room.roomCode, players);
+      await this.finishGame(room, players, now);
       return;
     }
 
     const eliminatedPlayer = chooseEliminationCandidate(alivePlayers);
-    await eliminatePlayer(eliminatedPlayer.id, alivePlayers.length);
+    const eliminatedAt = toIsoString(now);
+    const nextEliminationAt = toIsoString(now + (room.eliminationIntervalSeconds * 1000));
 
-    const runtime = this.getRuntime(room.roomCode);
-    runtime.lastElimination = {
-      playerId: eliminatedPlayer.id,
-      nickname: eliminatedPlayer.nickname,
-      at: Date.now(),
-    };
-    runtime.nextEliminationAt = Date.now() + (room.eliminationIntervalSeconds * 1000);
+    await eliminatePlayer(eliminatedPlayer.id, alivePlayers.length, eliminatedAt);
+    await updateRoomElimination(room.id, eliminatedPlayer.id, eliminatedAt, nextEliminationAt);
 
     const updatedPlayers = await listPlayers(room.id);
     const updatedAlivePlayers = updatedPlayers.filter((player) => player.status === 'alive');
 
     if (updatedAlivePlayers.length <= 1) {
-      await this.finishGame(room.roomCode, updatedPlayers);
-      return;
+      await this.finishGame(room, updatedPlayers, now);
     }
-
-    await this.broadcastState(room.roomCode);
   }
 
-  async finishGame(roomCode, existingPlayers = null) {
-    const room = await this.requireRoom(roomCode);
-    const players = existingPlayers ?? (await listPlayers(room.id));
-    const winnerPool = players.filter(
+  async finishGame(room, players = null, now = Date.now()) {
+    const resolvedPlayers = players ?? (await listPlayers(room.id));
+    const winnerPool = resolvedPlayers.filter(
       (player) => player.status === 'alive' || player.status === 'winner',
     );
-    const winner = chooseWinner(winnerPool.length ? winnerPool : players);
+    const winner = chooseWinner(winnerPool.length ? winnerPool : resolvedPlayers);
 
     if (winner && winner.status !== 'winner') {
       await markWinner(winner.id);
     }
 
-    await finishRoom(room.id);
-    this.clearAllRuntimeTimers(room.roomCode);
-
-    const runtime = this.getRuntime(room.roomCode);
-    runtime.questionEndsAt = null;
-    runtime.revealEndsAt = null;
-    runtime.nextEliminationAt = null;
-
-    await this.broadcastState(room.roomCode);
+    await finishRoom(room.id, toIsoString(now));
   }
 
-  async buildBaseState(roomCode) {
-    const room = await this.requireRoom(roomCode);
-    const runtime = this.getRuntime(room.roomCode);
-    const players = await listPlayers(room.id);
-    const currentQuestion = room.currentQuestionId
-      ? await getQuestionById(room.currentQuestionId)
-      : null;
-    const currentAnswers = currentQuestion
-      ? await listAnswersForQuestion(room.id, currentQuestion.id)
-      : [];
-    const answerByPlayerId = new Map(
-      currentAnswers.map((answer) => [answer.roomPlayerId, answer]),
-    );
-    const playersById = new Map(players.map((player) => [player.id, player]));
-    const aliveCount = players.filter(
-      (player) => player.status === 'alive' || player.status === 'winner',
+  async getState(roomCode, viewer = { role: 'spectator', playerId: null }) {
+    const room = await this.reconcileRoom(roomCode);
+    const context = await buildRoomContext(room);
+    const player = viewer.playerId ? context.playersById.get(viewer.playerId) : null;
+    const viewerAnswer = player ? context.answerByPlayerId.get(player.id) ?? null : null;
+    const correctChoice = context.currentQuestion ? getCorrectChoice(context.currentQuestion) : null;
+    const aliveCount = context.players.filter(
+      (entry) => entry.status === 'alive' || entry.status === 'winner',
     ).length;
+    const lastEliminatedPlayer = room.lastEliminationPlayerId
+      ? context.playersById.get(room.lastEliminationPlayerId) ?? null
+      : null;
 
-    const leaderboard = [...players]
+    const leaderboard = [...context.players]
       .sort((left, right) => {
         if (right.score !== left.score) {
           return right.score - left.score;
@@ -598,72 +505,60 @@ export class GameOrchestrator {
 
         return new Date(left.joinedAt).getTime() - new Date(right.joinedAt).getTime();
       })
-      .map((player, index) => ({
-        id: player.id,
-        nickname: player.nickname,
-        score: player.score,
-        correctAnswers: player.correctAnswers,
-        wrongAnswers: player.wrongAnswers,
-        averageResponseMs: player.averageResponseMs,
-        status: player.status,
-        connected: player.connected,
-        finalRank: player.finalRank,
-        eliminatedAt: player.eliminatedAt,
-        rank: player.finalRank ?? index + 1,
+      .map((entry, index) => ({
+        id: entry.id,
+        nickname: entry.nickname,
+        score: entry.score,
+        correctAnswers: entry.correctAnswers,
+        wrongAnswers: entry.wrongAnswers,
+        averageResponseMs: entry.averageResponseMs,
+        status: entry.status,
+        connected: entry.connected,
+        finalRank: entry.finalRank,
+        eliminatedAt: entry.eliminatedAt,
+        rank: entry.finalRank ?? index + 1,
       }));
 
     return {
-      room,
-      runtime,
-      players,
-      playersById,
-      currentQuestion,
-      currentAnswers,
-      answerByPlayerId,
-      leaderboard,
-      aliveCount,
-    };
-  }
-
-  toViewerState(baseState, viewer = { role: 'spectator', playerId: null }) {
-    const player = viewer.playerId ? baseState.playersById.get(viewer.playerId) : null;
-    const viewerAnswer = player
-      ? baseState.answerByPlayerId.get(player.id) ?? null
-      : null;
-
-    return {
       room: {
-        id: baseState.room.id,
-        code: baseState.room.roomCode,
-        hostName: baseState.room.hostName,
-        status: baseState.room.status,
-        phase: baseState.room.currentPhase,
-        currentQuestionId: baseState.room.currentQuestionId,
-        currentQuestionOrder: baseState.runtime.currentQuestionOrder,
-        eliminationIntervalSeconds: baseState.room.eliminationIntervalSeconds,
-        maxPlayers: baseState.room.maxPlayers,
-        startedAt: baseState.room.startedAt,
-        endedAt: baseState.room.endedAt,
-        phaseEndsAt:
-          baseState.room.currentPhase === 'question_live'
-            ? baseState.runtime.questionEndsAt
-            : baseState.room.currentPhase === 'answer_reveal'
-              ? baseState.runtime.revealEndsAt
-              : null,
-        nextEliminationAt: baseState.runtime.nextEliminationAt,
+        id: room.id,
+        code: room.roomCode,
+        hostName: room.hostName,
+        status: room.status,
+        phase: room.currentPhase,
+        currentQuestionId: room.currentQuestionId,
+        currentQuestionOrder: room.currentQuestionOrder,
+        eliminationIntervalSeconds: room.eliminationIntervalSeconds,
+        maxPlayers: room.maxPlayers,
+        startedAt: room.startedAt,
+        endedAt: room.endedAt,
+        phaseEndsAt: toTimestamp(room.phaseEndsAt),
+        nextEliminationAt: toTimestamp(room.nextEliminationAt),
       },
-      question: buildQuestionPayload(
-        baseState.currentQuestion,
-        baseState.room.currentPhase,
-      ),
-      reveal: baseState.runtime.lastReveal,
-      lastElimination: baseState.runtime.lastElimination,
-      leaderboard: baseState.leaderboard,
+      question: buildQuestionPayload(context.currentQuestion, room.currentPhase),
+      reveal: (room.currentPhase === 'answer_reveal' || room.currentPhase === 'finished')
+        && context.currentQuestion
+        ? {
+          questionId: context.currentQuestion.id,
+          correctChoiceId: correctChoice?.id ?? null,
+          correctChoiceLabel: correctChoice?.label ?? null,
+          correctChoiceText: correctChoice?.text ?? context.currentQuestion.correctText ?? null,
+          explanation: context.currentQuestion.explanation,
+        }
+        : null,
+      lastElimination: lastEliminatedPlayer && room.lastEliminationAt
+        ? {
+          playerId: lastEliminatedPlayer.id,
+          nickname: lastEliminatedPlayer.nickname,
+          at: toTimestamp(room.lastEliminationAt),
+        }
+        : null,
+      leaderboard,
       meta: {
         serverTime: Date.now(),
-        totalPlayers: baseState.players.length,
-        alivePlayers: baseState.aliveCount,
-        answeredPlayers: baseState.currentAnswers.length,
+        totalPlayers: context.players.length,
+        alivePlayers: aliveCount,
+        answeredPlayers: context.answers.length,
       },
       viewer: {
         role: viewer.role ?? 'spectator',
@@ -676,35 +571,5 @@ export class GameOrchestrator {
         lastTypedAnswer: viewerAnswer?.typedAnswer ?? null,
       },
     };
-  }
-
-  async getState(roomCode, viewer) {
-    const baseState = await this.buildBaseState(roomCode);
-    return this.toViewerState(baseState, viewer);
-  }
-
-  async broadcastState(roomCode) {
-    const normalizedCode = normalizeRoomCode(roomCode);
-    const baseState = await this.buildBaseState(normalizedCode);
-
-    for (const [socketId, session] of this.socketSessions.entries()) {
-      if (session.roomCode !== normalizedCode) {
-        continue;
-      }
-
-      const socket = this.io.sockets.sockets.get(socketId);
-
-      if (!socket) {
-        continue;
-      }
-
-      socket.emit(
-        'room:state',
-        this.toViewerState(baseState, {
-          role: session.role,
-          playerId: session.playerId,
-        }),
-      );
-    }
   }
 }

@@ -34,11 +34,11 @@ function mapKnownMessageToError(error) {
     ['La room n est pas en phase de reponse.', 409, 'ROOM_NOT_ACCEPTING_ANSWERS'],
     ['Ce joueur est elimine et ne peut plus repondre.', 409, 'PLAYER_ELIMINATED'],
     ['Le joueur est introuvable dans cette room.', 404, 'PLAYER_NOT_FOUND'],
-    ['Le joueur demande est introuvable dans cette room.', 404, 'PLAYER_NOT_FOUND'],
-    ['Un playerId est requis pour souscrire en tant que joueur.', 400, 'PLAYER_ID_REQUIRED'],
     ['Aucune question active trouvee pour cette room.', 409, 'NO_ACTIVE_QUESTION'],
     ['Impossible de finaliser une question introuvable.', 409, 'QUESTION_NOT_FOUND'],
     ['Aucune question jouable avec 4 reponses A/B/C/D n est disponible en base.', 422, 'NO_PLAYABLE_QUESTIONS'],
+    ['La room a depasse la limite de transitions automatiques.', 500, 'ROOM_RECONCILIATION_LIMIT'],
+    ['La base Turso n est pas initialisee. Lancez le script de bootstrap avant de demarrer l application.', 503, 'DATABASE_NOT_BOOTSTRAPPED'],
   ];
 
   for (const [knownMessage, statusCode, code] of mappings) {

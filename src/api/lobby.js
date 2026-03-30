@@ -1,5 +1,4 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? "";
-export const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || undefined;
 
 async function apiFetch(path, options = {}) {
   let response;
@@ -47,6 +46,17 @@ export function joinRoom({ roomCode, nickname }) {
 export function startRoom(roomCode) {
   return apiFetch(`/api/rooms/${encodeURIComponent(roomCode)}/start`, {
     method: "POST",
+  });
+}
+
+export function submitAnswer({ roomCode, playerId, choiceId = null, typedAnswer = null }) {
+  return apiFetch(`/api/rooms/${encodeURIComponent(roomCode)}/answers`, {
+    method: "POST",
+    body: JSON.stringify({
+      playerId,
+      choiceId,
+      typedAnswer,
+    }),
   });
 }
 

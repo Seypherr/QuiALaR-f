@@ -30,14 +30,7 @@ function withTimeout(handler) {
   };
 }
 
-export function createApp({
-  orchestrator,
-  capabilities = {
-    runtimeMode: config.runtimeMode,
-    realtime: false,
-    statefulGameEngine: false,
-  },
-} = {}) {
+export function createApp({ orchestrator } = {}) {
   if (!orchestrator) {
     throw new Error('createApp requiert une instance d orchestrator.');
   }
@@ -75,9 +68,9 @@ export function createApp({
       ok: true,
       serverTime: Date.now(),
       runtime: {
-        mode: capabilities.runtimeMode,
-        realtime: capabilities.realtime,
-        statefulGameEngine: capabilities.statefulGameEngine,
+        mode: config.runtimeMode,
+        transport: 'http-polling',
+        pollingIntervalMs: config.http.pollingIntervalMs,
       },
       db,
     });
@@ -113,14 +106,6 @@ export function createApp({
   }));
 
   app.post('/api/rooms/:roomCode/start', withTimeout(async (request, response) => {
-    if (!capabilities.statefulGameEngine) {
-      throw createHttpError(
-        501,
-        'Le moteur de partie temps reel n est pas compatible avec Vercel Functions. Deployez le backend stateful hors Vercel.',
-        'REALTIME_ENGINE_UNSUPPORTED',
-      );
-    }
-
     const state = await orchestrator.startRoom(request.params.roomCode);
 
     response.json({
@@ -129,19 +114,21 @@ export function createApp({
     });
   }));
 
+  app.post('/api/rooms/:roomCode/answers', withTimeout(async (request, response) => {
+    const result = await orchestrator.submitAnswer({
+      roomCode: request.params.roomCode,
+      playerId: Number(request.body?.playerId),
+      choiceId: request.body?.choiceId ?? null,
+      typedAnswer: request.body?.typedAnswer ?? null,
+    });
+
+    response.status(201).json({
+      ok: true,
+      result,
+    });
+  }));
+
   app.get('/api/rooms/:roomCode/state', withTimeout(async (request, response) => {
-    if (!capabilities.statefulGameEngine) {
-      const room = await orchestrator.requireRoom(request.params.roomCode);
-
-      if (room.status !== 'lobby') {
-        throw createHttpError(
-          501,
-          'La lecture d une partie en cours exige un runtime stateful. Sur Vercel, gardez uniquement le frontend et deployez le backend temps reel a part.',
-          'ROOM_STATEFUL_RUNTIME_REQUIRED',
-        );
-      }
-    }
-
     const state = await orchestrator.getState(request.params.roomCode, {
       role: request.query.role ?? 'spectator',
       playerId: request.query.playerId ? Number(request.query.playerId) : null,

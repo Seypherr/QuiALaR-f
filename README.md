@@ -1,54 +1,89 @@
-# Qui a la réf ?
+# Qui a la ref ?
 
-Backend temps reel MVP pour un quiz battle royale multijoueur.
+MVP de quiz battle royale compatible Vercel.
 
-## Stack backend
+## Stack
 
-- `Node.js` + `Express`
-- `Socket.IO`
-- `MariaDB`
+- Front React + Vite
+- API Express serverless-friendly
+- Base Turso / libSQL
+- Temps reel par polling HTTP
 
-## Structure backend
+## Principe d architecture
 
-- `server/app.js`
-  Express pur, sans `listen`, reutilisable en local et en serverless
-- `server/index.js`
-  serveur HTTP local stateful avec Socket.IO
+- Le serveur reste l unique source de verite pour les scores, timers, corrections et eliminations.
+- Aucune room ne vit en memoire. Les transitions sont recalculées a partir des timestamps en base.
+- Le front interroge `GET /api/rooms/:roomCode/state` a intervalle regulier.
+
+## Fichiers cles
+
 - `api/index.js`
-  point d entree Vercel serverless
+  point d entree Vercel
+- `server/app.js`
+  app Express pure sans `listen`
+- `server/index.js`
+  serveur local de dev
 - `server/db.js`
-  pool MariaDB et helpers `withConnection` / `withTransaction`
+  client Turso / libSQL + bootstrap
 - `server/repositories/gameRepository.js`
-  acces SQL
+  acces SQL compatible SQLite/libSQL
 - `server/services/gameOrchestrator.js`
-  moteur de partie stateful
+  moteur de partie stateless
+- `database/turso-schema.sql`
+  schema SQLite/libSQL
+- `database/turso-seed.sql`
+  seed SQLite/libSQL
 
 ## Variables d environnement
+
+Backend:
 
 - `PORT`
 - `CLIENT_ORIGIN`
 - `ENIGMA_RUNTIME_MODE`
 - `REQUEST_TIMEOUT_MS`
-- `DB_HOST`
-- `DB_PORT`
-- `DB_USER`
-- `DB_PASSWORD`
-- `DB_NAME`
-- `DB_CONNECTION_LIMIT`
-- `DB_CONNECT_TIMEOUT_MS`
-- `DB_ACQUIRE_TIMEOUT_MS`
-- `DB_IDLE_TIMEOUT_SECONDS`
+- `POLLING_INTERVAL_MS`
+- `TURSO_DATABASE_URL`
+- `TURSO_AUTH_TOKEN`
+- `TURSO_BOOTSTRAP_ON_START`
 - `DEFAULT_ELIMINATION_INTERVAL_SECONDS`
 - `DEFAULT_MAX_PLAYERS`
 
-## Lancer le backend local stateful
+Front:
+
+- `VITE_API_URL`
+- `VITE_POLLING_INTERVAL_MS`
+
+Voir [.env.example](C:\Users\eporc\Documents\GitHub\Challenge-48H-G6\.env.example).
+
+## Lancement local
 
 1. Copier `.env.example` vers `.env`
-2. Verifier l acces a la base `enigma`
-3. Lancer `npm install`
-4. Lancer `npm run dev:server`
+2. Installer les dependances:
 
-Le serveur demarre par defaut sur `http://localhost:3001`.
+```bash
+npm install
+```
+
+3. Initialiser la base locale:
+
+```bash
+npm run db:bootstrap
+```
+
+4. Lancer le backend:
+
+```bash
+npm run dev:server
+```
+
+5. Lancer le front:
+
+```bash
+npm run dev
+```
+
+Le backend tourne par defaut sur `http://localhost:3001`.
 
 ## Endpoints REST
 
@@ -56,44 +91,39 @@ Le serveur demarre par defaut sur `http://localhost:3001`.
 - `POST /api/rooms`
 - `POST /api/rooms/:roomCode/players`
 - `POST /api/rooms/:roomCode/start`
+- `POST /api/rooms/:roomCode/answers`
 - `GET /api/rooms/:roomCode/state`
 
-## Evenements Socket.IO
+## Regles MVP prises en charge
 
-- `room:watch`
-  Payload: `{ roomCode, role, playerId? }`
-- `answer:submit`
-  Payload QCM: `{ roomCode, playerId, choiceId }`
-  Payload texte: `{ roomCode, playerId, typedAnswer }`
-- `room:state`
-  Emis par le serveur a chaque transition importante
+- room limitee a 8 joueurs
+- questions jouables limitees aux QCM avec 4 reponses `A`, `B`, `C`, `D`
+- cycle `question_live -> answer_reveal`
+- leaderboard toujours visible
+- elimination automatique toutes les 120 secondes
+- joueurs elimines conserves dans le classement
+- dernier joueur vivant declare gagnant
 
-## Vercel
+## Deploiement Vercel + Turso
 
-Le fichier `vercel.json` route tout `/api/*` vers `api/index.js`.
+1. Creer une base Turso.
+2. Importer `database/turso-schema.sql` puis `database/turso-seed.sql` dans cette base avec le shell Turso ou votre client SQL habituel.
 
-Important:
+3. Ajouter sur Vercel:
 
-- le mode serverless Vercel expose correctement l API HTTP
-- le moteur de partie temps reel actuel n est pas fiable sur Vercel Functions
-- raison 1: Socket.IO n est pas adapte a ce runtime stateless
-- raison 2: `GameOrchestrator` utilise des timers et un etat en memoire (`roomRuntimes`)
+```env
+CLIENT_ORIGIN=https://votre-front.vercel.app
+ENIGMA_RUNTIME_MODE=serverless
+REQUEST_TIMEOUT_MS=10000
+POLLING_INTERVAL_MS=1000
+TURSO_DATABASE_URL=libsql://...
+TURSO_AUTH_TOKEN=...
+DEFAULT_ELIMINATION_INTERVAL_SECONDS=120
+DEFAULT_MAX_PLAYERS=8
+VITE_API_URL=https://votre-front.vercel.app
+VITE_POLLING_INTERVAL_MS=1000
+```
 
-Conclusion production:
+4. Redeployer.
 
-- Vercel peut heberger le front
-- le backend temps reel stateful doit rester sur un serveur Node dedie, ou etre remplace par un service temps reel externe
-
-## Alternatives stables pour le temps reel
-
-- serveur Node dedie hors Vercel pour REST + Socket.IO + timers
-- Pusher / Ably / Supabase Realtime pour le transport temps reel
-- moteur de jeu et scheduler externalises dans un worker persistant
-
-## Notes de fiabilite
-
-- le pool MariaDB est singleton et reutilise en module scope
-- `withConnection` relache toujours la connexion
-- `withTransaction` fait `rollback` en cas d erreur
-- les routes HTTP sont protegees par un timeout applicatif
-- les erreurs retournent toujours du JSON via le middleware global
+Le fichier [vercel.json](C:\Users\eporc\Documents\GitHub\Challenge-48H-G6\vercel.json) route deja `/api/*` vers `api/index.js`.

@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { io } from "socket.io-client";
-import { getRoomState, SOCKET_URL } from "../api/lobby";
+import { useEffect, useMemo, useState } from "react";
+import { getRoomState, submitAnswer as submitAnswerRequest } from "../api/lobby";
+
+const POLLING_INTERVAL_MS = Number(import.meta.env.VITE_POLLING_INTERVAL_MS ?? 1000);
 
 export function useRoomState({ roomCode, role = "spectator", playerId = null }) {
-  const socketRef = useRef(null);
   const [state, setState] = useState(null);
   const [error, setError] = useState("");
   const [now, setNow] = useState(0);
@@ -15,14 +15,13 @@ export function useRoomState({ roomCode, role = "spectator", playerId = null }) 
 
     let cancelled = false;
 
-    async function bootstrap() {
-      setError("");
-
+    async function refreshState() {
       try {
         const result = await getRoomState(roomCode, { role, playerId });
 
         if (!cancelled) {
           setState(result.state);
+          setError("");
         }
       } catch (fetchError) {
         if (!cancelled) {
@@ -31,43 +30,12 @@ export function useRoomState({ roomCode, role = "spectator", playerId = null }) 
       }
     }
 
-    bootstrap();
-
-    const socket = SOCKET_URL
-      ? io(SOCKET_URL, {
-          transports: ["websocket"],
-        })
-      : io({
-          transports: ["websocket"],
-        });
-
-    socketRef.current = socket;
-
-    socket.on("connect", () => {
-      socket.emit("room:watch", { roomCode, role, playerId }, (ack) => {
-        if (!ack?.ok && !cancelled) {
-          setError(ack?.error ?? "Impossible de se connecter a la room.");
-        }
-      });
-    });
-
-    socket.on("room:state", (nextState) => {
-      if (!cancelled) {
-        setState(nextState);
-        setError("");
-      }
-    });
-
-    socket.on("connect_error", (socketError) => {
-      if (!cancelled) {
-        setError(socketError.message);
-      }
-    });
+    refreshState();
+    const interval = window.setInterval(refreshState, POLLING_INTERVAL_MS);
 
     return () => {
       cancelled = true;
-      socket.disconnect();
-      socketRef.current = null;
+      window.clearInterval(interval);
     };
   }, [playerId, role, roomCode]);
 
@@ -100,22 +68,11 @@ export function useRoomState({ roomCode, role = "spectator", playerId = null }) 
   }, [now, state?.room?.nextEliminationAt]);
 
   async function submitAnswer(payload) {
-    const socket = socketRef.current;
-
-    if (!socket) {
-      throw new Error("Connexion temps reel indisponible.");
-    }
-
-    return new Promise((resolve, reject) => {
-      socket.emit("answer:submit", payload, (ack) => {
-        if (!ack?.ok) {
-          reject(new Error(ack?.error ?? "Reponse refusee."));
-          return;
-        }
-
-        resolve(ack.result);
-      });
-    });
+    const result = await submitAnswerRequest(payload);
+    const refreshed = await getRoomState(roomCode, { role, playerId });
+    setState(refreshed.state);
+    setError("");
+    return result.result;
   }
 
   return {
