@@ -1,16 +1,53 @@
-# React + Vite
+# Enigma
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Backend temps reel MVP pour un quiz battle royale multijoueur.
 
-Currently, two official plugins are available:
+## Stack backend
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- `Node.js` + `Express`
+- `Socket.IO`
+- `MariaDB`
 
-## React Compiler
+## Lancer le backend
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+1. Copier `.env.example` vers `.env`
+2. Verifier l acces a la base `enigma`
+3. Lancer `npm install`
+4. Lancer `npm run dev:server`
 
-## Expanding the ESLint configuration
+Le serveur demarre par defaut sur `http://localhost:3001`.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Endpoints REST
+
+- `GET /api/health`
+- `POST /api/rooms`
+- `POST /api/rooms/:roomCode/players`
+- `POST /api/rooms/:roomCode/start`
+- `GET /api/rooms/:roomCode/state`
+
+## Evenements Socket.IO
+
+- `room:watch`
+  Payload: `{ roomCode, role, playerId? }`
+- `answer:submit`
+  Payload QCM: `{ roomCode, playerId, choiceId }`
+  Payload texte: `{ roomCode, playerId, typedAnswer }`
+- `room:state`
+  Emis par le serveur a chaque transition importante
+
+## Regles implementees
+
+- creation de room
+- join joueur
+- cycle `question_live -> answer_reveal`
+- calcul de score cote serveur
+- leaderboard temps reel
+- elimination automatique toutes les `120s` par defaut
+- joueur elimine conserve dans le leaderboard
+- dernier joueur vivant declare gagnant
+
+## Notes d integration front
+
+- Le serveur est la seule source de verite pour les phases, scores, eliminations et timers
+- Le front peut faire la creation/join/start en REST, puis se brancher en Socket.IO via `room:watch`
+- La question courante et le leaderboard sont exposes dans `room:state`
