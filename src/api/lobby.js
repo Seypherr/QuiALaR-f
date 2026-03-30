@@ -1,16 +1,74 @@
-// src/api/lobby.js
+const API_BASE_URL = import.meta.env.VITE_API_URL ?? "";
+export const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || undefined;
 
-const API_URL = "http://localhost/ton-dossier-php"; // L'adresse du XAMPP de ton pote
+async function apiFetch(path, options = {}) {
+  let response;
 
-export const checkLobbyStatus = async (roomCode) => {
   try {
-    const response = await fetch(
-      `${API_URL}/get_players_count.php?code=${roomCode}`,
-    );
-    const data = await response.json();
-
-    return data;
-  } catch (error) {
-    console.error("Erreur check lobby:", error);
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers ?? {}),
+      },
+      ...options,
+    });
+  } catch {
+    throw new Error("Impossible de joindre le serveur. Verifiez que le backend est lance.");
   }
-};
+
+  const isJson = response.headers.get("content-type")?.includes("application/json");
+  const payload = isJson ? await response.json() : null;
+
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error ?? `Request failed with status ${response.status}`);
+  }
+
+  return payload;
+}
+
+export function createRoom({ hostName, themeId = 1, maxPlayers = 8 }) {
+  return apiFetch("/api/rooms", {
+    method: "POST",
+    body: JSON.stringify({
+      hostName,
+      themeId,
+      maxPlayers,
+    }),
+  });
+}
+
+export function joinRoom({ roomCode, nickname }) {
+  return apiFetch(`/api/rooms/${encodeURIComponent(roomCode)}/players`, {
+    method: "POST",
+    body: JSON.stringify({ nickname }),
+  });
+}
+
+export function startRoom(roomCode) {
+  return apiFetch(`/api/rooms/${encodeURIComponent(roomCode)}/start`, {
+    method: "POST",
+  });
+}
+
+export function getRoomState(roomCode, viewer = {}) {
+  const params = new URLSearchParams();
+
+  if (viewer.role) {
+    params.set("role", viewer.role);
+  }
+
+  if (viewer.playerId) {
+    params.set("playerId", viewer.playerId);
+  }
+
+  const suffix = params.size ? `?${params.toString()}` : "";
+
+  return apiFetch(`/api/rooms/${encodeURIComponent(roomCode)}/state${suffix}`);
+}
+
+export function buildJoinUrl(roomCode) {
+  const baseUrl = window.location.origin;
+  return `${baseUrl}/scan?room=${encodeURIComponent(roomCode)}`;
+}
+
+export { API_BASE_URL };

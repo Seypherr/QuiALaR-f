@@ -1,28 +1,42 @@
-export default function MediaQuestion({ data, onAnswer }) {
-    return (
-        <div className="w-full max-w-4xl flex flex-col items-center">
-            <h2 className="text-3xl font-bold text-white mb-6 text-center">{data.question}</h2>
+export default function MediaQuestion({ data, onAnswer, disabled = false }) {
+  const mediaUrl = data.mediaUrl || data.mediaPath;
+  const isVideo = /\.mp4$/i.test(mediaUrl ?? "");
 
-            <div className="bg-white p-4 rounded-3xl shadow-2xl mb-8 w-full flex justify-center">
-                {/* Support Image ou Vidéo simple */}
-                {data.mediaUrl.endsWith('.mp4') ? (
-                    <video src={data.mediaUrl} autoPlay loop muted className="rounded-xl max-h-80" />
-                ) : (
-                    <img src={data.mediaUrl} alt="Meme ref" className="rounded-xl max-h-80 object-contain" />
-                )}
+  return (
+    <div className="w-full max-w-4xl">
+      <div className="mb-8 flex justify-center rounded-[2rem] bg-white p-4 shadow-2xl">
+        {mediaUrl ? (
+          isVideo ? (
+            <video src={mediaUrl} autoPlay loop muted className="max-h-80 rounded-xl" />
+          ) : (
+            <img src={mediaUrl} alt="Question media" className="max-h-80 rounded-xl object-contain" />
+          )
+        ) : (
+          <div className="grid h-72 w-full place-items-center rounded-2xl bg-slate-100 text-center text-slate-500">
+            <div>
+              <p className="text-sm font-semibold uppercase tracking-[0.3em]">Media</p>
+              <p className="mt-3 text-lg">{data.mediaPath || "Aucun media disponible"}</p>
             </div>
+          </div>
+        )}
+      </div>
 
-            <div className="grid grid-cols-2 gap-4 w-full">
-                {data.options.map((opt, i) => (
-                    <button
-                        key={i}
-                        onClick={() => onAnswer(opt === data.answer)}
-                        className="bg-indigo-600 hover:bg-indigo-700 text-white text-xl py-4 rounded-full transition-all shadow-lg"
-                    >
-                        {opt}
-                    </button>
-                ))}
-            </div>
-        </div>
-    );
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        {data.options.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            disabled={disabled}
+            onClick={() => onAnswer(option.id)}
+            className="rounded-full bg-indigo-600 px-6 py-5 text-left text-xl font-bold text-white shadow-lg transition-all hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-55"
+          >
+            <span className="mr-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-white/15 text-sm uppercase tracking-[0.3em]">
+              {option.label}
+            </span>
+            {option.text}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }

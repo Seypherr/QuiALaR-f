@@ -12,6 +12,9 @@ export function getPool() {
       password: config.db.password,
       database: config.db.database,
       connectionLimit: config.db.connectionLimit,
+      acquireTimeout: config.db.acquireTimeoutMs,
+      connectTimeout: config.db.connectTimeoutMs,
+      idleTimeout: config.db.idleTimeoutSeconds,
       bigIntAsNumber: true,
       insertIdAsNumber: true,
     });
